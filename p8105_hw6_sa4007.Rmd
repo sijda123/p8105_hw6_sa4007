@@ -1,0 +1,278 @@
+---
+title: "P8105 HW 6"
+author: "Sijda Ahmed (sa4007)"
+output: github_document
+---
+
+```{r}
+# load in necessary packages
+library(tidyverse)
+library(p8105.datasets)
+library(ggplot2)
+library(modelr)
+
+# default options
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+```
+
+
+## Problem 1
+
+```{r}
+# Load in data and clean it
+homicide_data = read_csv("data/homicide-data.csv") |>
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    solved = ifelse(disposition == "Closed by arrest", 1, 0) # 1 if solved, 0 if unsolved
+  ) |>
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+         victim_race %in% c("White", "Black")) |>
+  drop_na()
+
+```
+
+```{r}
+# Fit a logistic regression for the city of Baltimore, MD
+balt = homicide_data |>
+  filter(city_state == "Baltimore, MD")
+balt_model = glm(solved ~ victim_age + victim_sex + victim_race, data = balt, family = binomial)
+
+# Obtain the estimate and CI of the adjusted odds ratio for male victims
+balt_model |> 
+  broom::tidy(conf.int = TRUE) |> 
+  filter(term == "victim_sexMale") |>
+  select(estimate, conf.low, conf.high)
+
+```
+The estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims keeping all other variables fixed are respectively, -0.7852843 and -1.080293 to -0.4912916.
+
+```{r}
+# Running glm for all the cities in the dataset and obtaining the estimates of the adjusted odds ratio
+cities_model = homicide_data |>
+  group_by(city_state) |>
+  nest() |>
+  mutate(
+    fits = map(data, \(df) glm(solved ~ victim_age + victim_sex + victim_race, data = df, family = binomial)),
+    results = map(fits, broom::tidy)
+  ) |>
+  unnest(results) |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate)
+
+```
+
+```{r}
+# Plot that shows the estimated ORs for each city
+cities_model |>
+  mutate(
+    city_state = fct_reorder(city_state, estimate)
+  ) |>
+  ggplot(aes(x = city_state, y = estimate)) +
+  geom_point() +
+  labs(
+    x = "City, State",
+    y = "Adjusted OR",
+    title = "Adjusted Odds Ratio for Solving Homicides \nComparing Male to Female Victims"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+This plot shows that Oklahoma City, OK seems to have the largest estimated adjusted odds ratio for solving homicides comparing male victims to female victims. New York, NY seems to have the smallest estimated adjusted odds ratio for solving homicides comparing male victims to female victims.
+
+
+## Problem 2
+
+```{r}
+# Load in data
+data("weather_df")
+
+# Write a function to draw a bootstrap sample
+boot_sample = function(df) {
+  sample_frac(df, size = 1, replace = TRUE)
+}
+
+# Running bootstrap 5000 times
+boot_straps = 
+  tibble(
+    iter = 1:5000
+  ) |> 
+  mutate(
+    bootstrap_sample = map(iter, \(i) boot_sample(df = weather_df))
+  )
+
+# Fit linear model, get summary results, and put in tidy format
+bootstrap_results = 
+  boot_straps |> 
+  mutate(
+    fits = map(bootstrap_sample, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    summary = map(fits, broom::glance),
+    results = map(fits, broom::tidy)
+  )
+
+```
+
+```{r}
+# Get r^2 values
+r2_bootstrap = bootstrap_results |> 
+  select(iter, summary) |> 
+  unnest(summary) |>
+  select(iter, r.squared)
+
+# Plot distribution
+r2_bootstrap |> 
+  ggplot(aes(x = r.squared)) +
+  geom_density() +
+  labs(
+    x = "r^2 hat",
+    title = "Distribution of r^2 hat"
+  )
+
+r2_CI = t.test(r2_bootstrap$r.squared)$conf.int
+
+```
+The distribution of r^2 seems to be skewed to the left. The 95% confidence interval for r^2 is `r r2_CI`. 
+
+```{r}
+# Get b1/b2 values
+b1_b2_bootstrap = bootstrap_results |> 
+  select(iter, results) |> 
+  unnest(results) |>
+  select(iter, term, estimate) |>
+  group_by(iter) |>
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) |>
+  summarize(
+    b1_b2 = tmin/prcp
+  )
+
+# Plot distribution
+b1_b2_bootstrap |> 
+  ggplot(aes(x = b1_b2)) +
+  geom_density() +
+  labs(
+    x = "β^1 hat / β^2 hat",
+    title = "Distribution of β^1 hat / β^2 hat"
+  )
+
+b1_b2_CI = t.test(b1_b2_bootstrap$b1_b2)$conf.int
+
+```
+The distribution of β^1/β^2 is very left skewed. This is not a normal distribution. The 95% confidence interval for β^1/β^2 is `r b1_b2_CI`. 
+
+
+## Problem 3
+
+```{r}
+# Load in data and clean data
+bwt_data = read_csv("data/birthweight.csv") |>
+  janitor::clean_names() |>
+  mutate(
+    babysex = 
+        case_match(babysex,
+            1 ~ "male",
+            2 ~ "female"
+        ),
+    babysex = fct_infreq(babysex),
+    frace = 
+        case_match(frace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican", 
+            8 ~ "other"),
+    frace = fct_infreq(frace),
+    mrace = 
+        case_match(mrace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican",
+            8 ~ "other"),
+    mrace = fct_infreq(mrace),
+    malform = as.logical(malform))
+
+```
+
+```{r}
+# My proposed model using baby sex, length at birth, mother's weight at delivery, family monthly income, gestational age, and  presence of malformations that could affect weight
+m1 = lm(bwt ~ babysex + blength + delwt + fincome + gaweeks + malform, data = bwt_data)
+m1
+
+bwt_data |>
+  modelr::add_residuals(m1) |>
+  modelr::add_predictions(m1) |>
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point() +
+  labs(
+    x = "Fitted Values",
+    y = "Residuals",
+    title = "Residuals Against Fitted Values"
+  )
+
+```
+The model I choose is based on a hypothesized structure for the factors that underly birth weight. I believe baby sex, length at birth, mother's weight at delivery, family monthly income, gestational age, and  presence of malformations that could affect weight could have an influence on a child's birth weight. The plot shows that my model seems to have an okay fit since most points are randomly distributed around a horizontal line at 0 with some outliers.
+
+```{r}
+# Model using length at birth and gestational age as predictors (main effects only)
+m2 = lm(bwt ~ blength + gaweeks, data = bwt_data)
+m2
+
+# Model using  using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+m3 = lm(bwt ~ bhead + blength + babysex + bhead:blength:babysex, data = bwt_data)
+m3
+
+```
+
+```{r}
+# Cross validation
+cv_df = 
+  crossv_mc(bwt_data, n = 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  ) |>
+  mutate(
+    m1 = map(train, \(df) lm(bwt ~ babysex + blength + delwt + fincome + gaweeks + malform, data = df)),
+    m2 = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    m3 = map(train, \(df) lm(bwt ~ bhead + blength + babysex + bhead:blength:babysex, data = df))
+  ) |> 
+  mutate(
+    rmse_m1 = map2_dbl(m1, test, rmse),
+    rmse_m2 = map2_dbl(m2, test, rmse),
+    rmse_m3 = map2_dbl(m3, test, rmse)
+  )
+
+# Create violin plot to look at model performance
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin()
+
+```
+The model using length at birth and gestational age as predictors (m2) seems to be underperforming compared to the other models since it seems to have the highest RMSE. The model using  using head circumference, length, sex, and all interactions (m3) seems to have the best performance out of the three models since it seems to have the lowest RMSE. The model I proposed (m1) seems to have a slightly better performance than m2 but is still underperforming compared to m3. The model using  using head circumference, length, sex, and all interactions (m3) is the best model at predicting brith weight.
+
+
+
